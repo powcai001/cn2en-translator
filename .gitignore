@@ -1,6 +1,29 @@
-node_modules
-dist
-.env
-.env.local
+node_modules/
+
+# Build outputs
+dist/
+dist-electron/
+out/
+release/
+build/
+coverage/
+
+# Vite / Electron caches (best-effort)
+.vite/
+.electron/
+.cache/
+.tmp/
+
+# Logs
 *.log
+
+# Environment variables (keep example files)
+.env
+.env.*
+!.env.example
+
+# OS / IDE
 .DS_Store
+.vscode/
+.idea/
+*.tsbuildinfo
