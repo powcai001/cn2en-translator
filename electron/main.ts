@@ -4,6 +4,33 @@ import Store from 'electron-store'
 
 const store = new Store()
 
+// 保存原始 console 函数，防止递归
+const originalLog = console.log.bind(console)
+const originalError = console.error.bind(console)
+
+// 防止在关闭时写入已关闭的 stdout 导致 EPIPE 错误
+let isShuttingDown = false
+
+const safeLog = (...args: any[]) => {
+  if (!isShuttingDown) {
+    try {
+      originalLog(...args)
+    } catch {
+      // 忽略写入已关闭 stdout 的错误
+    }
+  }
+}
+
+const safeError = (...args: any[]) => {
+  if (!isShuttingDown) {
+    try {
+      originalError(...args)
+    } catch {
+      // 忽略写入已关闭 stderr 的错误
+    }
+  }
+}
+
 interface Settings {
   shortcut: string
   apiProvider: 'google' | 'openai'
@@ -37,6 +64,32 @@ let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let currentShortcut = DEFAULT_SETTINGS.shortcut
 
+// 单实例锁：确保只运行一个应用实例
+const gotTheLock = app.requestSingleInstanceLock()
+
+if (!gotTheLock) {
+  isShuttingDown = true
+  safeLog('Another instance is already running, quitting...')
+  app.quit()
+} else {
+  // 第二个实例尝试启动时，聚焦到第一个实例的窗口（只在主实例上注册）
+  app.on('second-instance', (_event, _commandLine, _workingDirectory) => {
+    safeLog('Second instance detected, focusing main window')
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      createWindow()
+    } else {
+      if (mainWindow.isMinimized()) {
+        mainWindow.restore()
+      }
+      if (!mainWindow.isVisible()) {
+        showWindowAtCursor()
+      } else {
+        mainWindow.focus()
+      }
+    }
+  })
+}
+
 // 自动检测是否为开发环境
 const isDev = process.env.NODE_ENV === 'development' ||
               process.defaultApp ||
@@ -58,6 +111,17 @@ function getWindowBounds(): WindowBounds {
 
 function saveWindowBounds(bounds: WindowBounds): void {
   store.set('windowBounds', bounds)
+}
+
+function normalizeWindowBounds(bounds: WindowBounds): WindowBounds {
+  const { workAreaSize } = screen.getPrimaryDisplay()
+  const maxWidth = Math.max(MIN_WINDOW_WIDTH, workAreaSize.width - 80)
+  const maxHeight = Math.max(MIN_WINDOW_HEIGHT, workAreaSize.height - 80)
+
+  return {
+    width: Math.min(maxWidth, Math.max(MIN_WINDOW_WIDTH, Math.round(bounds.width || DEFAULT_WINDOW_BOUNDS.width))),
+    height: Math.min(maxHeight, Math.max(MIN_WINDOW_HEIGHT, Math.round(bounds.height || DEFAULT_WINDOW_BOUNDS.height))),
+  }
 }
 
 function createDefaultTrayIcon() {
@@ -84,7 +148,7 @@ function registerShortcut(shortcut: string): boolean {
 
   const result = globalShortcut.register(shortcut, () => {
     const selectedText = clipboard.readText()
-    console.log('Shortcut triggered, clipboard text:', selectedText)
+    safeLog('Shortcut triggered, clipboard text:', selectedText)
 
     showWindowAtCursor()
 
@@ -95,9 +159,9 @@ function registerShortcut(shortcut: string): boolean {
 
   if (result) {
     currentShortcut = shortcut
-    console.log('Shortcut registered successfully:', shortcut)
+    safeLog('Shortcut registered successfully:', shortcut)
   } else {
-    console.error('Failed to register shortcut:', shortcut)
+    safeError('Failed to register shortcut:', shortcut)
     // 恢复之前的快捷键
     if (currentShortcut) {
       globalShortcut.register(currentShortcut, () => {
@@ -114,7 +178,8 @@ function registerShortcut(shortcut: string): boolean {
 }
 
 function createWindow() {
-  const windowBounds = getWindowBounds()
+  const windowBounds = normalizeWindowBounds(getWindowBounds())
+  saveWindowBounds(windowBounds)
 
   mainWindow = new BrowserWindow({
     width: windowBounds.width,
@@ -136,8 +201,7 @@ function createWindow() {
 
   if (isDev) {
     mainWindow.loadURL('http://localhost:5173')
-    mainWindow.webContents.openDevTools()
-    console.log('Development mode: loading from http://localhost:5173')
+    safeLog('Development mode: loading from http://localhost:5173')
   } else {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
   }
@@ -148,14 +212,14 @@ function createWindow() {
       const { bounds: screenBounds } = primaryDisplay
       const { width, height } = mainWindow.getBounds()
 
-      const x = screenBounds.x + (screenBounds.width - width) / 2
-      const y = screenBounds.y + (screenBounds.height - height) / 2
+      const x = Math.round(screenBounds.x + (screenBounds.width - width) / 2)
+      const y = Math.round(screenBounds.y + (screenBounds.height - height) / 2)
 
       mainWindow.setPosition(x, y)
       mainWindow.show()
       mainWindow.focus()
 
-      console.log('Window shown at PRIMARY screen center:', { x, y })
+      safeLog('Window shown at PRIMARY screen center:', { x, y })
     }
   })
 
@@ -163,26 +227,19 @@ function createWindow() {
     mainWindow = null
   })
 
-  mainWindow.on('resize', () => {
-    if (mainWindow) {
-      const [width, height] = mainWindow.getSize()
-      saveWindowBounds({ width, height })
-    }
-  })
-
-  console.log('Window created')
+  safeLog('Window created')
 }
 
 function showWindowAtCursor() {
   if (!mainWindow) {
-    console.log('No main window exists')
+    safeLog('No main window exists')
     return
   }
 
   const cursorPos = screen.getCursorScreenPoint()
   const display = screen.getDisplayNearestPoint(cursorPos)
 
-  console.log('Shortcut triggered, cursor position:', cursorPos)
+  safeLog('Shortcut triggered, cursor position:', cursorPos)
 
   let x = cursorPos.x + 15
   let y = cursorPos.y + 15
@@ -198,14 +255,14 @@ function showWindowAtCursor() {
     y = cursorPos.y - height - 15
   }
 
-  x = Math.max(screenBounds.x, x)
-  y = Math.max(screenBounds.y, y)
+  x = Math.round(Math.max(screenBounds.x, x))
+  y = Math.round(Math.max(screenBounds.y, y))
 
   mainWindow.setPosition(x, y)
   mainWindow.show()
   mainWindow.focus()
 
-  console.log('Window shown at cursor position:', { x, y })
+  safeLog('Window shown at cursor position:', { x, y })
 }
 
 // 创建系统托盘图标
@@ -241,6 +298,7 @@ function createTray() {
     {
       label: '退出',
       click: () => {
+        isShuttingDown = true
         app.quit()
       }
     }
@@ -261,74 +319,45 @@ function createTray() {
   })
 }
 
-app.whenReady().then(() => {
-  console.log('App ready, creating window...')
-  createWindow()
-  createTray()
+// 只有在获取到单实例锁时才初始化应用
+if (gotTheLock) {
+  app.whenReady().then(() => {
+    safeLog('App ready, creating window...')
+    createWindow()
+    createTray()
 
-  // 注册初始快捷键
-  const settings = getSettings()
-  registerShortcut(settings.shortcut)
+    // 注册初始快捷键
+    const settings = getSettings()
+    registerShortcut(settings.shortcut)
 
-  // IPC: 获取设置
-  ipcMain.handle('get-settings', () => {
-    return getSettings()
+    // IPC: 获取设置
+    ipcMain.handle('get-settings', () => {
+      return getSettings()
+    })
+
+    // IPC: 保存设置
+    ipcMain.handle('save-settings', (_event, newSettings: Settings) => {
+      saveSettings(newSettings)
+
+      // 重新注册快捷键
+      if (newSettings.shortcut !== currentShortcut) {
+        registerShortcut(newSettings.shortcut)
+      }
+
+      return { success: true }
+    })
+
+    ipcMain.on('close-window', () => {
+      if (mainWindow) {
+        mainWindow.hide()
+      }
+    })
+
+    ipcMain.on('show-window', () => {
+      showWindowAtCursor()
+    })
   })
-
-  // IPC: 保存设置
-  ipcMain.handle('save-settings', (_event, newSettings: Settings) => {
-    saveSettings(newSettings)
-
-    // 重新注册快捷键
-    if (newSettings.shortcut !== currentShortcut) {
-      registerShortcut(newSettings.shortcut)
-    }
-
-    return { success: true }
-  })
-
-  // 拖动窗口相关
-  let dragStartPos: { x: number; y: number } | null = null
-
-  ipcMain.on('window-drag-start', (_event, posX: number, posY: number) => {
-    if (mainWindow) {
-      dragStartPos = { x: posX, y: posY }
-    }
-  })
-
-  ipcMain.on('window-drag-move', (_event, posX: number, posY: number) => {
-    if (mainWindow && dragStartPos) {
-      const [currentX, currentY] = mainWindow.getPosition()
-      const deltaX = posX - dragStartPos.x
-      const deltaY = posY - dragStartPos.y
-      mainWindow.setPosition(currentX + deltaX, currentY + deltaY)
-      dragStartPos = { x: posX, y: posY }
-    }
-  })
-
-  ipcMain.on('window-drag-end', () => {
-    dragStartPos = null
-  })
-
-  ipcMain.on('close-window', () => {
-    if (mainWindow) {
-      mainWindow.hide()
-    }
-  })
-
-  ipcMain.on('show-window', () => {
-    showWindowAtCursor()
-  })
-
-  ipcMain.on('set-window-size', (_event, width: number, height: number) => {
-    if (mainWindow) {
-      const nextWidth = Math.max(MIN_WINDOW_WIDTH, Math.round(width))
-      const nextHeight = Math.max(MIN_WINDOW_HEIGHT, Math.round(height))
-      mainWindow.setSize(nextWidth, nextHeight)
-      saveWindowBounds({ width: nextWidth, height: nextHeight })
-    }
-  })
-})
+}
 
 app.on('window-all-closed', () => {
   // 在 Windows 和 Linux 上，关闭所有窗口时不退出应用，而是保留托盘图标
@@ -340,6 +369,7 @@ app.on('window-all-closed', () => {
 })
 
 app.on('will-quit', () => {
+  isShuttingDown = true
   globalShortcut.unregisterAll()
 })
 

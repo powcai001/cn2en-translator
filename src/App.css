@@ -56,6 +56,7 @@ html {
   background: rgba(255, 255, 255, 0.5);
   border-bottom: 1px solid rgba(0, 0, 0, 0.06);
   flex-shrink: 0;
+  -webkit-app-region: drag;
 }
 
 .title {
@@ -85,6 +86,7 @@ html {
   align-items: center;
   justify-content: center;
   transition: all 0.15s;
+  -webkit-app-region: no-drag;
 }
 
 .close-btn:hover {
@@ -162,6 +164,7 @@ html {
   cursor: pointer;
   transition: all 0.2s;
   box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
+  -webkit-app-region: no-drag;
 }
 
 .translate-btn:hover:not(:disabled) {
@@ -191,6 +194,7 @@ html {
   font-size: 10px;
   cursor: pointer;
   transition: all 0.2s;
+  -webkit-app-region: no-drag;
 }
 
 .copy-btn:hover {
@@ -232,33 +236,12 @@ html {
   justify-content: center;
   transition: all 0.2s;
   z-index: 10;
+  -webkit-app-region: no-drag;
 }
 
 .settings-btn:hover {
   background: rgba(102, 126, 234, 0.25);
   transform: scale(1.05);
-}
-
-.resize-handle {
-  position: absolute;
-  right: 6px;
-  bottom: 6px;
-  width: 20px;
-  height: 20px;
-  cursor: nwse-resize;
-  z-index: 10;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: rgba(102, 126, 234, 0.5);
-  font-size: 14px;
-  user-select: none;
-  pointer-events: auto;
-}
-
-.resize-handle::after {
-  content: '⤡';
-  font-weight: bold;
 }
 
 /* 设置模态框 */
@@ -289,6 +272,7 @@ html {
   width: min(420px, calc(100vw - 24px));
   max-height: 80vh;
   overflow-y: auto;
+  -webkit-app-region: no-drag;
 }
 
 .settings-header {
@@ -333,6 +317,7 @@ html {
   font-family: inherit;
   background: rgba(255, 255, 255, 0.8);
   transition: all 0.2s;
+  -webkit-app-region: no-drag;
 }
 
 .settings-input:focus,
@@ -364,6 +349,7 @@ html {
   font-weight: 500;
   cursor: pointer;
   transition: all 0.2s;
+  -webkit-app-region: no-drag;
 }
 
 .settings-btn-primary {
@@ -403,6 +389,13 @@ html {
   font-size: 12px;
   text-align: center;
   min-width: 120px;
+  -webkit-app-region: no-drag;
+}
+
+.input-textarea,
+.output-textarea,
+.shortcut-hint {
+  -webkit-app-region: no-drag;
 }
 
 .shortcut-display.recording {

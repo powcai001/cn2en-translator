@@ -18,9 +18,6 @@ const DEFAULT_SETTINGS: Settings = {
   openaiModel: 'gpt-3.5-turbo',
 }
 
-const MIN_WINDOW_WIDTH = 320
-const MIN_WINDOW_HEIGHT = 200
-
 const getIpcRenderer = () => {
   const electron = (window as any).require?.('electron')
   return electron?.ipcRenderer
@@ -35,10 +32,6 @@ function App() {
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS)
   const [shortcutHint, setShortcutHint] = useState('Ctrl+Alt+T')
   const [isRecording, setIsRecording] = useState(false)
-  const [isDragging, setIsDragging] = useState(false)
-  const [isResizing, setIsResizing] = useState(false)
-  const dragOffset = useRef({ x: 0, y: 0 })
-  const resizeStart = useRef({ x: 0, y: 0, width: 0, height: 0 })
 
   // 加载设置
   useEffect(() => {
@@ -166,99 +159,10 @@ function App() {
     setIsRecording(true)
   }
 
-  const handleTitleBarMouseDown = (e: React.MouseEvent) => {
-    // 如果点击的是关闭按钮，不触发拖动
-    if ((e.target as HTMLElement).closest('.close-btn')) {
-      return
-    }
-    setIsDragging(true)
-    dragOffset.current = {
-      x: e.screenX,
-      y: e.screenY,
-    }
-  }
-
-  const handleMouseMove = (e: MouseEvent) => {
-    if (!isDragging) return
-    const ipcRenderer = getIpcRenderer()
-    if (ipcRenderer) {
-      ipcRenderer.send('window-drag-move', e.screenX, e.screenY)
-    }
-  }
-
-  const handleMouseUp = () => {
-    const ipcRenderer = getIpcRenderer()
-    if (ipcRenderer) {
-      ipcRenderer.send('window-drag-end')
-    }
-    setIsDragging(false)
-  }
-
-  const handleResizeMouseDown = (e: React.MouseEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
-    resizeStart.current = {
-      x: e.screenX,
-      y: e.screenY,
-      width: window.innerWidth,
-      height: window.innerHeight,
-    }
-    setIsResizing(true)
-  }
-
-  const handleResizeMouseMove = (e: MouseEvent) => {
-    if (!isResizing) return
-    const ipcRenderer = getIpcRenderer()
-    if (ipcRenderer) {
-      const nextWidth = Math.max(
-        MIN_WINDOW_WIDTH,
-        resizeStart.current.width + (e.screenX - resizeStart.current.x)
-      )
-      const nextHeight = Math.max(
-        MIN_WINDOW_HEIGHT,
-        resizeStart.current.height + (e.screenY - resizeStart.current.y)
-      )
-      ipcRenderer.send('set-window-size', nextWidth, nextHeight)
-    }
-  }
-
-  const handleResizeMouseUp = () => {
-    document.body.style.cursor = ''
-    setIsResizing(false)
-  }
-
-  useEffect(() => {
-    if (isDragging) {
-      const ipcRenderer = getIpcRenderer()
-      if (ipcRenderer) {
-        ipcRenderer.send('window-drag-start', dragOffset.current.x, dragOffset.current.y)
-      }
-      window.addEventListener('mousemove', handleMouseMove)
-      window.addEventListener('mouseup', handleMouseUp)
-      return () => {
-        window.removeEventListener('mousemove', handleMouseMove)
-        window.removeEventListener('mouseup', handleMouseUp)
-      }
-    }
-  }, [isDragging])
-
-  useEffect(() => {
-    if (isResizing) {
-      document.body.style.cursor = 'nwse-resize'
-      window.addEventListener('mousemove', handleResizeMouseMove)
-      window.addEventListener('mouseup', handleResizeMouseUp)
-      return () => {
-        document.body.style.cursor = ''
-        window.removeEventListener('mousemove', handleResizeMouseMove)
-        window.removeEventListener('mouseup', handleResizeMouseUp)
-      }
-    }
-  }, [isResizing])
-
   return (
     <>
       <div className="app">
-        <div className="title-bar" onMouseDown={handleTitleBarMouseDown}>
+        <div className="title-bar">
           <span className="title">中英翻译</span>
           <span className="shortcut-hint">{shortcutHint}</span>
           <button className="close-btn" onClick={closeWindow}>
@@ -309,12 +213,6 @@ function App() {
         <button className="settings-btn" onClick={openSettings} title="打开设置">
           ⚙
         </button>
-
-        <div
-          className="resize-handle"
-          onMouseDown={handleResizeMouseDown}
-          title="拖拽调整窗口大小"
-        />
       </div>
 
       {showSettings && (
