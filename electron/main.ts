@@ -64,6 +64,9 @@ let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let currentShortcut = DEFAULT_SETTINGS.shortcut
 let shouldSaveResize = true  // 控制 resize 事件是否保存窗口大小
+let lastShortcutTriggeredAt = 0
+
+const SHORTCUT_DEBOUNCE_MS = 350
 
 // 单实例锁：确保只运行一个应用实例
 const gotTheLock = app.requestSingleInstanceLock()
@@ -140,6 +143,18 @@ function createDefaultTrayIcon() {
     .resize({ width: 16, height: 16 })
 }
 
+function shouldHandleShortcutTrigger(): boolean {
+  const now = Date.now()
+
+  if (now - lastShortcutTriggeredAt < SHORTCUT_DEBOUNCE_MS) {
+    safeLog('Shortcut ignored due to debounce window')
+    return false
+  }
+
+  lastShortcutTriggeredAt = now
+  return true
+}
+
 // 注册快捷键
 function registerShortcut(shortcut: string): boolean {
   // 先注销之前的快捷键
@@ -148,6 +163,10 @@ function registerShortcut(shortcut: string): boolean {
   }
 
   const result = globalShortcut.register(shortcut, () => {
+    if (!shouldHandleShortcutTrigger()) {
+      return
+    }
+
     const selectedText = clipboard.readText()
     safeLog('Shortcut triggered, clipboard text:', selectedText)
 
@@ -166,6 +185,10 @@ function registerShortcut(shortcut: string): boolean {
     // 恢复之前的快捷键
     if (currentShortcut) {
       globalShortcut.register(currentShortcut, () => {
+        if (!shouldHandleShortcutTrigger()) {
+          return
+        }
+
         const selectedText = clipboard.readText()
         showWindowAtCursor()
         if (mainWindow && selectedText) {
