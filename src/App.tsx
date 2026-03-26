@@ -64,6 +64,20 @@ function App() {
     }
   }, [settings])
 
+  // ESC 键关闭窗口
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !showSettings) {
+        closeWindow()
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [showSettings])
+
   const formatShortcut = (shortcut: string): string => {
     return shortcut
       .replace('CommandOrControl+', 'Ctrl+')

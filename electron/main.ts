@@ -53,8 +53,8 @@ const DEFAULT_SETTINGS: Settings = {
 }
 
 const DEFAULT_WINDOW_BOUNDS: WindowBounds = {
-  width: 360,
-  height: 220,
+  width: 420,
+  height: 260,
 }
 
 const MIN_WINDOW_WIDTH = 320
@@ -63,6 +63,7 @@ const MIN_WINDOW_HEIGHT = 200
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let currentShortcut = DEFAULT_SETTINGS.shortcut
+let shouldSaveResize = true  // 控制 resize 事件是否保存窗口大小
 
 // 单实例锁：确保只运行一个应用实例
 const gotTheLock = app.requestSingleInstanceLock()
@@ -188,7 +189,7 @@ function createWindow() {
     minHeight: MIN_WINDOW_HEIGHT,
     frame: false,
     transparent: true,
-    resizable: true,
+    resizable: true,  // 使用原生 resize
     alwaysOnTop: true,
     skipTaskbar: false,
     show: false,
@@ -200,14 +201,36 @@ function createWindow() {
   })
 
   if (isDev) {
-    mainWindow.loadURL('http://localhost:5173')
-    safeLog('Development mode: loading from http://localhost:5173')
+    const tryLoad = async (urls: string[]): Promise<boolean> => {
+      for (const url of urls) {
+        try {
+          if (mainWindow) {
+            await mainWindow.loadURL(url)
+            safeLog(`Development mode: loaded from ${url}`)
+            return true
+          }
+        } catch {
+          // 继续尝试下一个 URL
+        }
+      }
+      return false
+    }
+
+    tryLoad(['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5175', 'http://localhost:5176'])
+      .then(success => {
+        if (!success && mainWindow) {
+          safeError('Failed to load from any Vite dev server port')
+        }
+      })
   } else {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
   }
 
   mainWindow.once('ready-to-show', () => {
     if (mainWindow) {
+      // 禁用 resize 保存，防止窗口初始化时的抖动被保存
+      shouldSaveResize = false
+
       const primaryDisplay = screen.getPrimaryDisplay()
       const { bounds: screenBounds } = primaryDisplay
       const { width, height } = mainWindow.getBounds()
@@ -220,11 +243,23 @@ function createWindow() {
       mainWindow.focus()
 
       safeLog('Window shown at PRIMARY screen center:', { x, y })
+
+      // 延迟恢复 resize 保存，确保窗口完全稳定
+      setTimeout(() => {
+        shouldSaveResize = true
+      }, 500)
     }
   })
 
   mainWindow.on('closed', () => {
     mainWindow = null
+  })
+
+  mainWindow.on('resize', () => {
+    if (mainWindow && shouldSaveResize) {
+      const [width, height] = mainWindow.getSize()
+      saveWindowBounds({ width, height })
+    }
   })
 
   safeLog('Window created')
@@ -236,6 +271,14 @@ function showWindowAtCursor() {
     return
   }
 
+  // 禁用 resize 保存，防止窗口显示时的抖动被保存
+  shouldSaveResize = false
+
+  // 每次打开窗口时，重置到理想尺寸
+  const idealWidth = 420
+  const idealHeight = 260
+  mainWindow.setSize(idealWidth, idealHeight)
+
   const cursorPos = screen.getCursorScreenPoint()
   const display = screen.getDisplayNearestPoint(cursorPos)
 
@@ -244,15 +287,14 @@ function showWindowAtCursor() {
   let x = cursorPos.x + 15
   let y = cursorPos.y + 15
 
-  const { width, height } = mainWindow.getBounds()
   const { bounds: screenBounds } = display
 
-  if (x + width > screenBounds.x + screenBounds.width) {
-    x = cursorPos.x - width - 15
+  if (x + idealWidth > screenBounds.x + screenBounds.width) {
+    x = cursorPos.x - idealWidth - 15
   }
 
-  if (y + height > screenBounds.y + screenBounds.height) {
-    y = cursorPos.y - height - 15
+  if (y + idealHeight > screenBounds.y + screenBounds.height) {
+    y = cursorPos.y - idealHeight - 15
   }
 
   x = Math.round(Math.max(screenBounds.x, x))
@@ -263,6 +305,14 @@ function showWindowAtCursor() {
   mainWindow.focus()
 
   safeLog('Window shown at cursor position:', { x, y })
+
+  // 更新保存的窗口边界
+  saveWindowBounds({ width: idealWidth, height: idealHeight })
+
+  // 延迟恢复 resize 保存，确保窗口完全稳定
+  setTimeout(() => {
+    shouldSaveResize = true
+  }, 500)
 }
 
 // 创建系统托盘图标
@@ -355,6 +405,18 @@ if (gotTheLock) {
 
     ipcMain.on('show-window', () => {
       showWindowAtCursor()
+    })
+
+    // IPC: 设置窗口大小（自定义缩放手柄）
+    ipcMain.on('set-window-size', (_event, data: { width: number; height: number }) => {
+      if (mainWindow && typeof data?.width === 'number' && typeof data?.height === 'number') {
+        const nextWidth = Math.max(MIN_WINDOW_WIDTH, Math.round(data.width))
+        const nextHeight = Math.max(MIN_WINDOW_HEIGHT, Math.round(data.height))
+        const [currentWidth, currentHeight] = mainWindow.getSize()
+        safeLog('set-window-size:', { received: data, current: [currentWidth, currentHeight], next: [nextWidth, nextHeight] })
+        mainWindow.setSize(nextWidth, nextHeight)
+        saveWindowBounds({ width: nextWidth, height: nextHeight })
+      }
     })
   })
 }
