@@ -40,7 +40,7 @@
   },
   "build": {
     "appId": "com.cn2en.translator",
-    "productName": "中英翻译",
+    "productName": "CN2EN Translator",
     "win": {
       "target": [
         "nsis"

@@ -1,107 +1,98 @@
 # 中英翻译助手
 
-一个基于 Electron 的桌面翻译工具，支持中文一键翻译成英文。
+一款简洁高效的桌面翻译工具，支持划词翻译和截图翻译，让您的工作更加便捷。
 
-## 功能特点
+## 主要功能
 
-- 实时中英翻译
-- 全局快捷键支持 (Ctrl+Shift+T)
-- 简洁美观的界面
-- 一键复制翻译结果
+### 划词翻译
+- 选中文本后按快捷键，自动识别并翻译
+- 智能检测中英文，自动双向翻译
+- 翻译结果直接显示，无需点击
 
-## 下载与安装 (GitHub Releases)
+### 截图翻译
+- 截图识别图片中的文字并翻译
+- 支持 OpenAI 兼容接口（如 GPT-4o、GPT-4 Vision）
+- 自动识别文字语言并翻译
 
-发布后，用户可在 GitHub 仓库的 Releases 页面下载对应系统安装包：
+### 手动翻译
+- 输入文本进行翻译
+- 支持中英互译
 
-- 仓库主页: https://github.com/powcai001/cn2en-translator
-- Releases: https://github.com/powcai001/cn2en-translator/releases
+### 快捷操作
+- 按 `C` 键快速复制翻译结果
+- 按 `ESC` 键或点击窗口外部关闭窗口
+- 可自定义快捷键
+
+### 多种翻译API
+- **Google Translate** - 免费使用，无需配置
+- **OpenAI 兼容接口** - 支持自定义接口地址、鉴权方式
+
+## 下载与安装
+
+前往 [GitHub Releases](https://github.com/powcai001/cn2en-translator/releases) 下载对应系统的安装包。
 
 ### Windows
-
-1. 在 Releases 下载 `.exe` 安装包
-2. 双击运行安装程序
-3. 安装完成后从开始菜单启动应用
+下载 `.exe` 安装包，双击运行安装
 
 ### macOS
-
-1. 在 Releases 下载 `.dmg` (或 `.zip`) 安装包
-2. 打开后将应用拖入 `Applications`
-3. 首次启动若被系统拦截，请在系统设置中允许打开
+下载 `.dmg` 文件，打开后拖入 Applications 文件夹
 
 ### Linux
+- `.AppImage`: 下载后添加执行权限 `chmod +x 文件名.AppImage` 运行
+- `.deb`: Ubuntu/Debian 使用 `sudo dpkg -i 文件名.deb` 安装
+- `.rpm`: Fedora/CentOS 使用 `sudo rpm -i 文件名.rpm` 安装
 
-按发布产物类型选择：
+## 使用指南
 
-- `.AppImage`: 下载后执行 `chmod +x 文件名.AppImage`，再运行
-- `.deb`: Ubuntu/Debian 可双击安装或使用 `sudo dpkg -i 文件名.deb`
-- `.rpm`: Fedora/CentOS 可使用 `sudo rpm -i 文件名.rpm`
+### 默认快捷键
+- **划词翻译**: `Ctrl+Alt+T` (macOS: `Cmd+Alt+T`)
+- **截图翻译**: `Ctrl+Alt+S` (macOS: `Cmd+Alt+S`)
 
-## 开发者从源码运行
+### 截图翻译配置
+截图翻译需要配置 OpenAI 兼容接口：
 
-### 1) 克隆项目
+1. 点击右下角设置按钮 ⚙
+2. 启用"截图翻译"
+3. 配置接口地址、API密钥等信息
+4. 选择视觉模型（如 GPT-4o）
+
+### 窗口操作
+- 窗口大小可手动调整，会自动记住
+- 点击窗口外部或按 `ESC` 关闭窗口
+- 按 `C` 快速复制翻译结果
+
+## 开发者指南
+
+### 从源码运行
 
 ```bash
+# 克隆项目
 git clone https://github.com/powcai001/cn2en-translator.git
 cd cn2en-translator
-```
 
-### 2) 安装依赖
-
-```bash
+# 安装依赖
 npm install
-```
 
-### 3) 开发模式运行 (Electron + Vite)
-
-```bash
+# 开发模式运行
 npm run electron:dev
-```
 
-如果只想运行前端页面 (不启动 Electron)：
-
-```bash
+# 仅运行前端
 npm run dev
 ```
 
-## 构建与发布
-
-### 本地打包
+### 构建打包
 
 ```bash
 npm run electron:build
 ```
 
-打包完成后，安装包通常位于 `dist/` 或 `release/` (取决于构建配置)。
-
-### 发布到 GitHub
-
-1. 进入仓库的 Releases 页面
-2. 点击 "Draft a new release"
-3. 填写版本号和更新说明
-4. 上传各系统安装包 (`.exe` / `.dmg` / `.AppImage` / `.deb` / `.rpm`)
-5. 发布 Release
-
-## 翻译API配置
-
-项目默认使用 Google Translate 免费API，无需配置即可使用。
-
-如需使用百度翻译API（更稳定）：
-
-1. 访问 https://fanyi-api.baidu.com/ 申请API密钥
-2. 创建 `.env` 文件：
-
-```
-VITE_BAIDU_APP_ID=你的APP_ID
-VITE_BAIDU_SECRET_KEY=你的密钥
-```
-
-## 快捷键
-
-- **Ctrl+Shift+T**: 复制文本后按下，自动填充并翻译
-
 ## 技术栈
 
-- Electron
-- React + TypeScript
-- Vite
-- Axios
+- **Electron** - 跨平台桌面应用框架
+- **React + TypeScript** - 前端框架
+- **Vite** - 构建工具
+- **Electron Store** - 配置持久化
+
+## 许可证
+
+MIT License
