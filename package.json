@@ -41,6 +41,15 @@
   "build": {
     "appId": "com.cn2en.translator",
     "productName": "CN2EN Translator",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "src/selection.html",
+      "package.json"
+    ],
     "win": {
       "target": [
         "nsis"
