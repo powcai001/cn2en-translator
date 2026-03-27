@@ -1,6 +1,10 @@
 import { app, BrowserWindow, globalShortcut, clipboard, screen, ipcMain, Tray, Menu, nativeImage } from 'electron'
 import * as path from 'path'
 import Store from 'electron-store'
+import { exec } from 'child_process'
+import { promisify } from 'util'
+
+const execAsync = promisify(exec)
 
 const store = new Store()
 
@@ -67,6 +71,22 @@ let shouldSaveResize = true  // 控制 resize 事件是否保存窗口大小
 let lastShortcutTriggeredAt = 0
 
 const SHORTCUT_DEBOUNCE_MS = 350
+
+// 模拟 Ctrl+C 复制选中的文字（仅 Windows）
+async function simulateCopy() {
+  if (process.platform !== 'win32') {
+    return
+  }
+
+  try {
+    // 使用 PowerShell 模拟 Ctrl+C
+    await execAsync('powershell -Command "$wshell = New-Object -ComObject WScript.Shell; $wshell.SendKeys(\'^c\')"')
+    // 等待复制操作完成
+    await new Promise(resolve => setTimeout(resolve, 50))
+  } catch (error) {
+    safeError('Failed to simulate copy:', error)
+  }
+}
 
 // 单实例锁：确保只运行一个应用实例
 const gotTheLock = app.requestSingleInstanceLock()
@@ -162,10 +182,16 @@ function registerShortcut(shortcut: string): boolean {
     globalShortcut.unregister(currentShortcut)
   }
 
-  const result = globalShortcut.register(shortcut, () => {
+  const result = globalShortcut.register(shortcut, async () => {
     if (!shouldHandleShortcutTrigger()) {
       return
     }
+
+    // 先模拟 Ctrl+C 复制选中的文字
+    await simulateCopy()
+
+    // 等待一小段时间确保复制完成
+    await new Promise(resolve => setTimeout(resolve, 100))
 
     const selectedText = clipboard.readText()
     safeLog('Shortcut triggered, clipboard text:', selectedText)
@@ -184,10 +210,16 @@ function registerShortcut(shortcut: string): boolean {
     safeError('Failed to register shortcut:', shortcut)
     // 恢复之前的快捷键
     if (currentShortcut) {
-      globalShortcut.register(currentShortcut, () => {
+      globalShortcut.register(currentShortcut, async () => {
         if (!shouldHandleShortcutTrigger()) {
           return
         }
+
+        // 先模拟 Ctrl+C 复制选中的文字
+        await simulateCopy()
+
+        // 等待一小段时间确保复制完成
+        await new Promise(resolve => setTimeout(resolve, 100))
 
         const selectedText = clipboard.readText()
         showWindowAtCursor()
