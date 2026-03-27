@@ -16,7 +16,10 @@
     "chinese",
     "english"
   ],
-  "author": "",
+  "author": {
+    "name": "powcai",
+    "email": "762307667@qq.com"
+  },
   "license": "MIT",
   "dependencies": {
     "axios": "^1.6.0",
