@@ -59,6 +59,7 @@ function App() {
   const [shortcutHint, setShortcutHint] = useState('Ctrl+Alt+T')
   const [isRecording, setIsRecording] = useState(false)
   const [isRecordingScreenshot, setIsRecordingScreenshot] = useState(false)
+  const [isResultMode, setIsResultMode] = useState(false)
   const hasRestoredUiState = useRef(false)
 
   // 加载设置和界面状态
@@ -112,32 +113,41 @@ function App() {
     const ipcRenderer = getIpcRenderer()
     if (ipcRenderer) {
       const handleTranslateShortcut = (_: any, text: string) => {
+        setIsResultMode(true)
         setSourceText(text)
         setTargetText('')
         setError('')
+        window.focus()
         if (text && text.trim()) {
           handleTranslate(text)
         }
       }
 
       const handleScreenshotStatus = (_: any, statusText: string) => {
+        setIsResultMode(true)
         setSourceText('')
         setTargetText(statusText)
         setError('')
         setIsLoading(true)
+        window.focus()
       }
 
       const handleScreenshotResult = (_: any, resultText: string) => {
+        setIsResultMode(true)
         setSourceText('')
         setTargetText(resultText)
         setError('')
         setIsLoading(false)
+        window.focus()
       }
 
       const handleScreenshotError = (_: any, errorMessage: string) => {
+        setIsResultMode(true)
+        setSourceText('')
         setError(errorMessage || '截图翻译失败')
         setTargetText('')
         setIsLoading(false)
+        window.focus()
       }
 
       ipcRenderer.on('translate-shortcut', handleTranslateShortcut)
@@ -154,11 +164,29 @@ function App() {
     }
   }, [settings])
 
-  // ESC 键关闭窗口
+  // 监听窗口模式变化事件
+  useEffect(() => {
+    const ipcRenderer = getIpcRenderer()
+    if (ipcRenderer) {
+      const handleWindowModeChanged = (_: any, mode: 'result' | 'input') => {
+        setIsResultMode(mode === 'result')
+      }
+      ipcRenderer.on('window-mode-changed', handleWindowModeChanged)
+      return () => {
+        ipcRenderer.removeListener('window-mode-changed', handleWindowModeChanged)
+      }
+    }
+  }, [])
+
+  // ESC 键关闭窗口，C 键复制翻译结果
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !showSettings) {
+      if (showSettings) return
+
+      if (e.key === 'Escape') {
         closeWindow()
+      } else if (e.key === 'c' && targetText) {
+        copyResult()
       }
     }
 
@@ -166,7 +194,7 @@ function App() {
     return () => {
       window.removeEventListener('keydown', handleKeyDown)
     }
-  }, [showSettings])
+  }, [showSettings, targetText])
 
   const formatShortcut = (shortcut: string): string => {
     return shortcut
@@ -304,28 +332,35 @@ function App() {
         </div>
 
         <div className="content">
-          <div className="input-section">
-            <textarea
-              className="input-textarea"
-              value={sourceText}
-              onChange={(e: any) => setSourceText(e.target.value)}
-              placeholder="输入中文或英文..."
-              rows={1}
-              autoFocus
-            />
-          </div>
+          {!isResultMode && (
+            <div className="input-section">
+              <textarea
+                className="input-textarea"
+                value={sourceText}
+                onChange={(e: any) => {
+                  setIsResultMode(false)
+                  setSourceText(e.target.value)
+                }}
+                placeholder="输入中文或英文..."
+                rows={1}
+                autoFocus
+              />
+            </div>
+          )}
 
-          <div className="action-section">
-            <button
-              className="translate-btn"
-              onClick={() => handleTranslate()}
-              disabled={isLoading || !sourceText.trim()}
-            >
-              {isLoading ? '翻译中...' : '翻译'}
-            </button>
-          </div>
+          {!isResultMode && (
+            <div className="action-section">
+              <button
+                className="translate-btn"
+                onClick={() => handleTranslate()}
+                disabled={isLoading || !sourceText.trim()}
+              >
+                {isLoading ? '翻译中...' : '翻译'}
+              </button>
+            </div>
+          )}
 
-          <div className="output-section">
+          <div className={`output-section ${isResultMode ? 'result-mode' : ''}`}>
             <textarea
               className="output-textarea"
               value={targetText}
@@ -335,7 +370,7 @@ function App() {
             />
             {targetText && (
               <button className="copy-btn" onClick={copyResult}>
-                复制
+                按c复制
               </button>
             )}
           </div>

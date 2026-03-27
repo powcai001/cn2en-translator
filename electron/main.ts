@@ -6,6 +6,7 @@ import { promisify } from 'util'
 import axios from 'axios'
 
 const execAsync = promisify(exec)
+const screenshotDesktop = require('screenshot-desktop')
 
 const store = new Store()
 
@@ -79,8 +80,13 @@ const DEFAULT_SETTINGS: Settings = {
 }
 
 const DEFAULT_WINDOW_BOUNDS: WindowBounds = {
-  width: 1500,
-  height: 520,
+  width: 1600,
+  height: 640,
+}
+
+const LEGACY_WINDOW_BOUNDS_MAX = {
+  width: 520,
+  height: 320,
 }
 
 const DEFAULT_UI_STATE: UiState = {
@@ -120,47 +126,6 @@ function closeSelectionWindows() {
   selectionWindows = []
 }
 
-function getClipboardImageSignature(): string {
-  const image = clipboard.readImage()
-
-  if (image.isEmpty()) {
-    return ''
-  }
-
-  const png = image.toPNG()
-  const head = png.subarray(0, Math.min(32, png.length)).toString('base64')
-
-  return `${png.length}:${head}`
-}
-
-async function captureScreenAreaWithNativeWindowsSnipping(): Promise<Buffer | null> {
-  const initialSignature = getClipboardImageSignature()
-
-  await simulateWindowsSnippingShortcut()
-
-  const startedAt = Date.now()
-  const timeoutMs = 30000
-  const pollIntervalMs = 250
-
-  while (Date.now() - startedAt < timeoutMs) {
-    await new Promise(resolve => setTimeout(resolve, pollIntervalMs))
-
-    const image = clipboard.readImage()
-    if (image.isEmpty()) {
-      continue
-    }
-
-    const nextSignature = getClipboardImageSignature()
-    if (nextSignature !== initialSignature) {
-      safeLog('Native Windows snipping image captured from clipboard')
-      return image.toPNG()
-    }
-  }
-
-  safeLog('Native Windows snipping timed out or was cancelled')
-  return null
-}
-
 // 模拟 Ctrl+C 复制选中的文字（仅 Windows）
 async function simulateCopy() {
   if (process.platform !== 'win32') {
@@ -174,40 +139,6 @@ async function simulateCopy() {
     await new Promise(resolve => setTimeout(resolve, 50))
   } catch (error) {
     safeError('Failed to simulate copy:', error)
-  }
-}
-
-async function simulateWindowsSnippingShortcut() {
-  if (process.platform !== 'win32') {
-    return
-  }
-
-  try {
-    await execAsync(`powershell -Command "
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class KeyboardInput {
-  [DllImport(\\"user32.dll\\", SetLastError=true)]
-  public static extern void keybd_event(byte bVk, byte bScan, int dwFlags, int dwExtraInfo);
-}
-'@
-$KEYEVENTF_KEYUP = 0x2
-$VK_LWIN = 0x5B
-$VK_SHIFT = 0x10
-$VK_S = 0x53
-[KeyboardInput]::keybd_event($VK_LWIN, 0, 0, 0)
-[KeyboardInput]::keybd_event($VK_SHIFT, 0, 0, 0)
-[KeyboardInput]::keybd_event($VK_S, 0, 0, 0)
-Start-Sleep -Milliseconds 80
-[KeyboardInput]::keybd_event($VK_S, 0, $KEYEVENTF_KEYUP, 0)
-[KeyboardInput]::keybd_event($VK_SHIFT, 0, $KEYEVENTF_KEYUP, 0)
-[KeyboardInput]::keybd_event($VK_LWIN, 0, $KEYEVENTF_KEYUP, 0)
-"`)
-    safeLog('Triggered native Windows snipping shortcut: Win+Shift+S')
-  } catch (error) {
-    safeError('Failed to trigger native Windows snipping shortcut:', error)
-    throw error
   }
 }
 
@@ -271,6 +202,62 @@ async function captureScreenArea(area: Rectangle): Promise<Buffer> {
     height: area.height,
   })
 
+  if (process.platform === 'win32') {
+    const displays = await screenshotDesktop.listDisplays()
+    const targetTopLeft = screen.dipToScreenPoint({
+      x: area.x,
+      y: area.y,
+    })
+    const targetBottomRight = screen.dipToScreenPoint({
+      x: area.x + area.width,
+      y: area.y + area.height,
+    })
+    const screenshotDisplay = displays.find((display: any) => {
+      const horizontalOverlap = Math.min(targetBottomRight.x, display.left + display.width) - Math.max(targetTopLeft.x, display.left)
+      const verticalOverlap = Math.min(targetBottomRight.y, display.top + display.height) - Math.max(targetTopLeft.y, display.top)
+      return horizontalOverlap > 0 && verticalOverlap > 0
+    }) || displays.find((display: any) => {
+      const expectedLeft = Math.round(targetDisplay.bounds.x * targetDisplay.scaleFactor)
+      const expectedTop = Math.round(targetDisplay.bounds.y * targetDisplay.scaleFactor)
+      return Math.abs(display.left - expectedLeft) < 4 && Math.abs(display.top - expectedTop) < 4
+    }) || displays[0]
+
+    if (!screenshotDisplay) {
+      throw new Error('无法匹配截图显示器')
+    }
+
+    safeLog('Using screenshot-desktop display:', {
+      electronDisplayId: targetDisplay.id,
+      electronBounds: targetDisplay.bounds,
+      electronScaleFactor: targetDisplay.scaleFactor,
+      screenshotDisplay,
+      targetTopLeft,
+      targetBottomRight,
+    })
+
+    const screenBuffer = await screenshotDesktop({
+      screen: screenshotDisplay.id,
+      format: 'png',
+    })
+
+    const image = nativeImage.createFromBuffer(screenBuffer)
+    const cropX = Math.max(0, targetTopLeft.x - screenshotDisplay.left)
+    const cropY = Math.max(0, targetTopLeft.y - screenshotDisplay.top)
+    const cropWidth = Math.min(targetBottomRight.x - targetTopLeft.x, image.getSize().width - cropX)
+    const cropHeight = Math.min(targetBottomRight.y - targetTopLeft.y, image.getSize().height - cropY)
+
+    if (cropWidth <= 0 || cropHeight <= 0) {
+      throw new Error('截图区域无效')
+    }
+
+    return image.crop({
+      x: cropX,
+      y: cropY,
+      width: cropWidth,
+      height: cropHeight,
+    }).toPNG()
+  }
+
   const sources = await desktopCapturer.getSources({
     types: ['screen'],
     thumbnailSize: {
@@ -326,23 +313,18 @@ async function handleScreenshotTranslation() {
 
   try {
     let imageBuffer: Buffer | null = null
+    const selection = await createSelectionWindow()
 
-    if (process.platform === 'win32') {
-      imageBuffer = await captureScreenAreaWithNativeWindowsSnipping()
-    } else {
-      const selection = await createSelectionWindow()
-
-      if (!selection) {
-        if (mainWindow && !mainWindow.isVisible()) {
-          mainWindow.show()
-          mainWindow.focus()
-        }
-        return
+    if (!selection) {
+      if (mainWindow && !mainWindow.isVisible()) {
+        mainWindow.show()
+        mainWindow.focus()
       }
-
-      safeLog('Capturing screen area:', selection)
-      imageBuffer = await captureScreenArea(selection)
+      return
     }
+
+    safeLog('Capturing screen area:', selection)
+    imageBuffer = await captureScreenArea(selection)
 
     if (!imageBuffer) {
       if (mainWindow && !mainWindow.isVisible()) {
@@ -359,7 +341,7 @@ async function handleScreenshotTranslation() {
     safeLog('Current settings - apiProvider:', settings.apiProvider, 'openaiApiKey:', settings.openaiApiKey ? 'configured' : 'missing')
 
     // 显示加载提示
-    showWindowAtCursor()
+    showWindowAtCursor(true)
     mainWindow?.webContents.send('screenshot-translation-status', '正在识别文字...')
 
     // 调用图片翻译API
@@ -370,7 +352,7 @@ async function handleScreenshotTranslation() {
     mainWindow?.webContents.send('screenshot-translation-result', translatedText)
   } catch (error) {
     safeError('Screenshot translation failed:', error)
-    showWindowAtCursor()
+    showWindowAtCursor(true)
     mainWindow?.webContents.send('screenshot-translation-error', error instanceof Error ? error.message : '翻译失败')
   }
 }
@@ -541,7 +523,21 @@ function saveSettings(settings: Settings): void {
 }
 
 function getWindowBounds(): WindowBounds {
-  return store.get('windowBounds', DEFAULT_WINDOW_BOUNDS) as WindowBounds
+  const savedBounds = store.get('windowBounds') as WindowBounds | undefined
+
+  if (!savedBounds) {
+    return DEFAULT_WINDOW_BOUNDS
+  }
+
+  const looksLikeLegacyDefaultSize =
+    (savedBounds.width || 0) <= LEGACY_WINDOW_BOUNDS_MAX.width &&
+    (savedBounds.height || 0) <= LEGACY_WINDOW_BOUNDS_MAX.height
+
+  if (looksLikeLegacyDefaultSize) {
+    return DEFAULT_WINDOW_BOUNDS
+  }
+
+  return savedBounds
 }
 
 function saveWindowBounds(bounds: WindowBounds): void {
@@ -664,7 +660,7 @@ function registerShortcut(shortcut: string): boolean {
     const selectedText = clipboard.readText()
     safeLog('Shortcut triggered, clipboard text:', selectedText)
 
-    showWindowAtCursor()
+    showWindowAtCursor(true)
 
     if (mainWindow && selectedText) {
       mainWindow.webContents.send('translate-shortcut', selectedText)
@@ -690,7 +686,7 @@ function registerShortcut(shortcut: string): boolean {
         await new Promise(resolve => setTimeout(resolve, 100))
 
         const selectedText = clipboard.readText()
-        showWindowAtCursor()
+        showWindowAtCursor(true)
         if (mainWindow && selectedText) {
           mainWindow.webContents.send('translate-shortcut', selectedText)
         }
@@ -790,10 +786,31 @@ function createWindow() {
     }
   })
 
+  // 点击窗口外部时隐藏窗口（延迟检查，避免误触发）
+  let blurTimeout: any = null
+  mainWindow.on('blur', () => {
+    if (mainWindow && mainWindow.isVisible()) {
+      // 延迟隐藏，给窗口重新获得焦点的机会
+      blurTimeout = setTimeout(() => {
+        if (mainWindow && !mainWindow.isFocused() && mainWindow.isVisible()) {
+          mainWindow.hide()
+        }
+      }, 150)
+    }
+  })
+
+  mainWindow.on('focus', () => {
+    // 如果窗口重新获得焦点，取消隐藏
+    if (blurTimeout) {
+      clearTimeout(blurTimeout)
+      blurTimeout = null
+    }
+  })
+
   safeLog('Window created')
 }
 
-function showWindowAtCursor() {
+function showWindowAtCursor(resultMode = false) {
   if (!mainWindow) {
     safeLog('No main window exists')
     return
@@ -838,7 +855,10 @@ function showWindowAtCursor() {
   mainWindow.focus()
   saveCurrentWindowBounds()
 
-  safeLog('Window shown at cursor position:', { x, y, width, height })
+  // 通知渲染进程切换模式
+  mainWindow.webContents.send('window-mode-changed', resultMode ? 'result' : 'input')
+
+  safeLog('Window shown at cursor position:', { x, y, width, height, mode: resultMode ? 'result' : 'input' })
 
   // 延迟恢复 resize 保存，确保窗口完全稳定
   setTimeout(() => {
