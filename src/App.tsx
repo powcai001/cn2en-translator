@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { translate } from './api/translate'
 import './App.css'
 
@@ -7,7 +7,20 @@ interface Settings {
   apiProvider: 'google' | 'openai'
   openaiApiKey: string
   openaiApiUrl: string
+  openaiAuthHeaderName?: string
+  openaiAuthPrefix?: string
   openaiModel: string
+  // 截图翻译相关设置
+  screenshotShortcut?: string
+  enableScreenshotTranslation?: boolean
+  visionModel?: string
+}
+
+interface UiState {
+  sourceText: string
+  targetText: string
+  error: string
+  showSettings: boolean
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -15,7 +28,20 @@ const DEFAULT_SETTINGS: Settings = {
   apiProvider: 'google',
   openaiApiKey: '',
   openaiApiUrl: 'https://api.openai.com/v1',
+  openaiAuthHeaderName: 'Authorization',
+  openaiAuthPrefix: 'Bearer',
   openaiModel: 'gpt-3.5-turbo',
+  // 截图翻译相关设置
+  screenshotShortcut: 'CommandOrControl+Alt+S',
+  enableScreenshotTranslation: false,
+  visionModel: 'gpt-4o',
+}
+
+const DEFAULT_UI_STATE: UiState = {
+  sourceText: '',
+  targetText: '',
+  error: '',
+  showSettings: false,
 }
 
 const getIpcRenderer = () => {
@@ -32,34 +58,98 @@ function App() {
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS)
   const [shortcutHint, setShortcutHint] = useState('Ctrl+Alt+T')
   const [isRecording, setIsRecording] = useState(false)
+  const [isRecordingScreenshot, setIsRecordingScreenshot] = useState(false)
+  const hasRestoredUiState = useRef(false)
 
-  // 加载设置
+  // 加载设置和界面状态
   useEffect(() => {
     const ipcRenderer = getIpcRenderer()
     if (ipcRenderer) {
-      ipcRenderer.invoke('get-settings').then((loadedSettings: Settings) => {
+      Promise.all([
+        ipcRenderer.invoke('get-settings'),
+        ipcRenderer.invoke('get-ui-state')
+      ]).then(([loadedSettings, loadedUiState]: [Settings, UiState]) => {
         if (loadedSettings) {
           setSettings(loadedSettings)
           setShortcutHint(formatShortcut(loadedSettings.shortcut))
         }
+
+        if (loadedUiState) {
+          setSourceText(loadedUiState.sourceText || DEFAULT_UI_STATE.sourceText)
+          setTargetText(loadedUiState.targetText || DEFAULT_UI_STATE.targetText)
+          setError(loadedUiState.error || DEFAULT_UI_STATE.error)
+          setShowSettings(Boolean(loadedUiState.showSettings))
+        }
+      }).finally(() => {
+        hasRestoredUiState.current = true
       })
     }
   }, [])
+
+  // 持久化界面状态
+  useEffect(() => {
+    const ipcRenderer = getIpcRenderer()
+    if (!ipcRenderer || !hasRestoredUiState.current) {
+      return
+    }
+
+    const timer = window.setTimeout(() => {
+      ipcRenderer.invoke('save-ui-state', {
+        sourceText,
+        targetText,
+        error,
+        showSettings,
+      } satisfies UiState)
+    }, 150)
+
+    return () => {
+      window.clearTimeout(timer)
+    }
+  }, [sourceText, targetText, error, showSettings])
 
   // 监听来自主进程的快捷键事件
   useEffect(() => {
     const ipcRenderer = getIpcRenderer()
     if (ipcRenderer) {
-      const handler = (_: any, text: string) => {
+      const handleTranslateShortcut = (_: any, text: string) => {
         setSourceText(text)
+        setTargetText('')
         setError('')
         if (text && text.trim()) {
           handleTranslate(text)
         }
       }
-      ipcRenderer.on('translate-shortcut', handler)
+
+      const handleScreenshotStatus = (_: any, statusText: string) => {
+        setSourceText('')
+        setTargetText(statusText)
+        setError('')
+        setIsLoading(true)
+      }
+
+      const handleScreenshotResult = (_: any, resultText: string) => {
+        setSourceText('')
+        setTargetText(resultText)
+        setError('')
+        setIsLoading(false)
+      }
+
+      const handleScreenshotError = (_: any, errorMessage: string) => {
+        setError(errorMessage || '截图翻译失败')
+        setTargetText('')
+        setIsLoading(false)
+      }
+
+      ipcRenderer.on('translate-shortcut', handleTranslateShortcut)
+      ipcRenderer.on('screenshot-translation-status', handleScreenshotStatus)
+      ipcRenderer.on('screenshot-translation-result', handleScreenshotResult)
+      ipcRenderer.on('screenshot-translation-error', handleScreenshotError)
+
       return () => {
-        ipcRenderer.removeListener('translate-shortcut', handler)
+        ipcRenderer.removeListener('translate-shortcut', handleTranslateShortcut)
+        ipcRenderer.removeListener('screenshot-translation-status', handleScreenshotStatus)
+        ipcRenderer.removeListener('screenshot-translation-result', handleScreenshotResult)
+        ipcRenderer.removeListener('screenshot-translation-error', handleScreenshotError)
       }
     }
   }, [settings])
@@ -90,7 +180,7 @@ function App() {
   const handleTranslate = async (text?: string) => {
     const inputText = text || sourceText
     if (!inputText.trim()) {
-      setError('请输入要翻译的中文内容')
+      setError('请输入要翻译的中文或英文内容')
       return
     }
 
@@ -144,7 +234,7 @@ function App() {
     }
   }
 
-  const handleShortcutChange = (e: React.KeyboardEvent) => {
+  const handleShortcutChange = (e: ReactKeyboardEvent) => {
     e.preventDefault()
     e.stopPropagation()
 
@@ -167,17 +257,46 @@ function App() {
     }
   }
 
+  const handleScreenshotShortcutChange = (e: ReactKeyboardEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+
+    const keys: string[] = []
+    if (e.ctrlKey) keys.push(isMac() ? 'Command' : 'Control')
+    if (e.altKey) keys.push('Alt')
+    if (e.shiftKey) keys.push('Shift')
+    if (e.metaKey) keys.push('Command')
+
+    // 主键
+    const mainKey = e.key
+    if (mainKey && !['Control', 'Alt', 'Shift', 'Meta'].includes(mainKey)) {
+      keys.push(mainKey.toUpperCase())
+    }
+
+    if (keys.length >= 2) {
+      const newShortcut = keys.join('+')
+      setSettings({ ...settings, screenshotShortcut: newShortcut })
+      setIsRecordingScreenshot(false)
+    }
+  }
+
   const isMac = () => navigator.platform.toUpperCase().indexOf('MAC') >= 0
 
   const startRecording = () => {
     setIsRecording(true)
   }
 
+  const startRecordingScreenshot = () => {
+    setIsRecordingScreenshot(true)
+  }
+
+  const shouldShowApiSettings = settings.apiProvider === 'openai' || settings.enableScreenshotTranslation
+
   return (
     <>
       <div className="app">
         <div className="title-bar">
-          <span className="title">中英翻译</span>
+          <span className="title">双向翻译</span>
           <span className="shortcut-hint">{shortcutHint}</span>
           <button className="close-btn" onClick={closeWindow}>
             ✕
@@ -189,8 +308,8 @@ function App() {
             <textarea
               className="input-textarea"
               value={sourceText}
-              onChange={(e) => setSourceText(e.target.value)}
-              placeholder="输入中文..."
+              onChange={(e: any) => setSourceText(e.target.value)}
+              placeholder="输入中文或英文..."
               rows={1}
               autoFocus
             />
@@ -230,7 +349,7 @@ function App() {
       </div>
 
       {showSettings && (
-        <div className="settings-modal" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="settings-modal" onMouseDown={(e: any) => e.stopPropagation()}>
           <div className="settings-panel">
             <div className="settings-header">
               <span className="settings-title">设置</span>
@@ -264,46 +383,120 @@ function App() {
                 <select
                   className="settings-select"
                   value={settings.apiProvider}
-                  onChange={(e) => setSettings({ ...settings, apiProvider: e.target.value as 'google' | 'openai' })}
+                  onChange={(e: any) => setSettings({ ...settings, apiProvider: e.target.value as 'google' | 'openai' })}
                 >
                   <option value="google">Google 翻译（免费）</option>
                   <option value="openai">OpenAI API</option>
                 </select>
               </div>
 
-              {settings.apiProvider === 'openai' && (
+              {shouldShowApiSettings && (
                 <>
                   <div className="settings-group">
-                    <label className="settings-label">API 地址</label>
+                    <label className="settings-label">接口地址</label>
                     <input
                       type="text"
                       className="settings-input"
                       value={settings.openaiApiUrl}
-                      onChange={(e) => setSettings({ ...settings, openaiApiUrl: e.target.value })}
-                      placeholder="https://api.openai.com/v1"
+                      onChange={(e: any) => setSettings({ ...settings, openaiApiUrl: e.target.value })}
+                      placeholder="http://127.0.0.1:8080/v1"
                     />
                   </div>
 
                   <div className="settings-group">
-                    <label className="settings-label">API Key</label>
+                    <label className="settings-label">凭证 / Token</label>
                     <input
                       type="password"
                       className="settings-input"
                       value={settings.openaiApiKey}
-                      onChange={(e) => setSettings({ ...settings, openaiApiKey: e.target.value })}
-                      placeholder="sk-..."
+                      onChange={(e: any) => setSettings({ ...settings, openaiApiKey: e.target.value })}
+                      placeholder="留空表示不发送鉴权头"
                     />
                   </div>
 
                   <div className="settings-group">
-                    <label className="settings-label">模型</label>
+                    <label className="settings-label">鉴权头名称</label>
                     <input
                       type="text"
                       className="settings-input"
-                      value={settings.openaiModel}
-                      onChange={(e) => setSettings({ ...settings, openaiModel: e.target.value })}
-                      placeholder="gpt-3.5-turbo"
+                      value={settings.openaiAuthHeaderName || ''}
+                      onChange={(e: any) => setSettings({ ...settings, openaiAuthHeaderName: e.target.value })}
+                      placeholder="Authorization 或 api-key"
                     />
+                  </div>
+
+                  <div className="settings-group">
+                    <label className="settings-label">鉴权前缀</label>
+                    <input
+                      type="text"
+                      className="settings-input"
+                      value={settings.openaiAuthPrefix || ''}
+                      onChange={(e: any) => setSettings({ ...settings, openaiAuthPrefix: e.target.value })}
+                      placeholder="Bearer，可留空"
+                    />
+                  </div>
+
+                  {settings.apiProvider === 'openai' && (
+                    <div className="settings-group">
+                      <label className="settings-label">文本模型</label>
+                      <input
+                        type="text"
+                        className="settings-input"
+                        value={settings.openaiModel}
+                        onChange={(e: any) => setSettings({ ...settings, openaiModel: e.target.value })}
+                        placeholder="gpt-3.5-turbo"
+                      />
+                    </div>
+                  )}
+                </>
+              )}
+
+              <div className="settings-group">
+                <label className="settings-label">截图翻译</label>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <input
+                    type="checkbox"
+                    id="enable-screenshot"
+                    checked={settings.enableScreenshotTranslation || false}
+                    onChange={(e: any) => setSettings({ ...settings, enableScreenshotTranslation: e.target.checked })}
+                  />
+                  <label htmlFor="enable-screenshot" style={{ fontSize: '13px' }}>启用截图翻译（支持 OpenAI 兼容接口）</label>
+                </div>
+              </div>
+
+              {settings.enableScreenshotTranslation && (
+                <>
+                  <div className="settings-group">
+                    <label className="settings-label">截图快捷键</label>
+                    <div className="shortcut-recorder">
+                      <div
+                        className={`shortcut-display ${isRecordingScreenshot ? 'recording' : ''}`}
+                        tabIndex={0}
+                        onKeyDown={handleScreenshotShortcutChange}
+                      >
+                        {isRecordingScreenshot ? '按下快捷键...' : formatShortcut(settings.screenshotShortcut || 'CommandOrControl+Alt+S')}
+                      </div>
+                      <button
+                        className="settings-btn-secondary"
+                        onClick={isRecordingScreenshot ? () => setIsRecordingScreenshot(false) : startRecordingScreenshot}
+                      >
+                        {isRecordingScreenshot ? '取消' : '录制'}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="settings-group">
+                    <label className="settings-label">视觉模型</label>
+                    <select
+                      className="settings-select"
+                      value={settings.visionModel || 'gpt-4o'}
+                      onChange={(e: any) => setSettings({ ...settings, visionModel: e.target.value })}
+                    >
+                      <option value="gpt-5.4">GPT-5.4（本地）</option>
+                      <option value="gpt-4o">GPT-4o</option>
+                      <option value="gpt-4-vision-preview">GPT-4 Vision Preview</option>
+                      <option value="gpt-4-turbo">GPT-4 Turbo</option>
+                    </select>
                   </div>
                 </>
               )}

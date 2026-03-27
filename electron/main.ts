@@ -1,8 +1,9 @@
-import { app, BrowserWindow, globalShortcut, clipboard, screen, ipcMain, Tray, Menu, nativeImage } from 'electron'
+import { app, BrowserWindow, globalShortcut, clipboard, screen, ipcMain, Tray, Menu, nativeImage, desktopCapturer } from 'electron'
 import * as path from 'path'
 import Store from 'electron-store'
 import { exec } from 'child_process'
 import { promisify } from 'util'
+import axios from 'axios'
 
 const execAsync = promisify(exec)
 
@@ -40,12 +41,27 @@ interface Settings {
   apiProvider: 'google' | 'openai'
   openaiApiKey: string
   openaiApiUrl: string
+  openaiAuthHeaderName?: string
+  openaiAuthPrefix?: string
   openaiModel: string
+  // 截图翻译相关设置
+  screenshotShortcut?: string
+  enableScreenshotTranslation?: boolean
+  visionModel?: string
 }
 
 interface WindowBounds {
+  x?: number
+  y?: number
   width: number
   height: number
+}
+
+interface UiState {
+  sourceText: string
+  targetText: string
+  error: string
+  showSettings: boolean
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -53,12 +69,25 @@ const DEFAULT_SETTINGS: Settings = {
   apiProvider: 'google',
   openaiApiKey: '',
   openaiApiUrl: 'https://api.openai.com/v1',
+  openaiAuthHeaderName: 'Authorization',
+  openaiAuthPrefix: 'Bearer',
   openaiModel: 'gpt-3.5-turbo',
+  // 截图翻译相关设置
+  screenshotShortcut: 'CommandOrControl+Alt+S',
+  enableScreenshotTranslation: false,
+  visionModel: 'gpt-4o',
 }
 
 const DEFAULT_WINDOW_BOUNDS: WindowBounds = {
-  width: 420,
-  height: 260,
+  width: 1500,
+  height: 520,
+}
+
+const DEFAULT_UI_STATE: UiState = {
+  sourceText: '',
+  targetText: '',
+  error: '',
+  showSettings: false,
 }
 
 const MIN_WINDOW_WIDTH = 320
@@ -66,11 +95,71 @@ const MIN_WINDOW_HEIGHT = 200
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
+let selectionWindows: BrowserWindow[] = []
 let currentShortcut = DEFAULT_SETTINGS.shortcut
+let currentScreenshotShortcut = DEFAULT_SETTINGS.screenshotShortcut || ''
 let shouldSaveResize = true  // 控制 resize 事件是否保存窗口大小
 let lastShortcutTriggeredAt = 0
 
 const SHORTCUT_DEBOUNCE_MS = 350
+
+// 选区矩形接口
+interface Rectangle {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+function closeSelectionWindows() {
+  selectionWindows.forEach(window => {
+    if (!window.isDestroyed()) {
+      window.close()
+    }
+  })
+  selectionWindows = []
+}
+
+function getClipboardImageSignature(): string {
+  const image = clipboard.readImage()
+
+  if (image.isEmpty()) {
+    return ''
+  }
+
+  const png = image.toPNG()
+  const head = png.subarray(0, Math.min(32, png.length)).toString('base64')
+
+  return `${png.length}:${head}`
+}
+
+async function captureScreenAreaWithNativeWindowsSnipping(): Promise<Buffer | null> {
+  const initialSignature = getClipboardImageSignature()
+
+  await simulateWindowsSnippingShortcut()
+
+  const startedAt = Date.now()
+  const timeoutMs = 30000
+  const pollIntervalMs = 250
+
+  while (Date.now() - startedAt < timeoutMs) {
+    await new Promise(resolve => setTimeout(resolve, pollIntervalMs))
+
+    const image = clipboard.readImage()
+    if (image.isEmpty()) {
+      continue
+    }
+
+    const nextSignature = getClipboardImageSignature()
+    if (nextSignature !== initialSignature) {
+      safeLog('Native Windows snipping image captured from clipboard')
+      return image.toPNG()
+    }
+  }
+
+  safeLog('Native Windows snipping timed out or was cancelled')
+  return null
+}
 
 // 模拟 Ctrl+C 复制选中的文字（仅 Windows）
 async function simulateCopy() {
@@ -86,6 +175,327 @@ async function simulateCopy() {
   } catch (error) {
     safeError('Failed to simulate copy:', error)
   }
+}
+
+async function simulateWindowsSnippingShortcut() {
+  if (process.platform !== 'win32') {
+    return
+  }
+
+  try {
+    await execAsync(`powershell -Command "
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class KeyboardInput {
+  [DllImport(\\"user32.dll\\", SetLastError=true)]
+  public static extern void keybd_event(byte bVk, byte bScan, int dwFlags, int dwExtraInfo);
+}
+'@
+$KEYEVENTF_KEYUP = 0x2
+$VK_LWIN = 0x5B
+$VK_SHIFT = 0x10
+$VK_S = 0x53
+[KeyboardInput]::keybd_event($VK_LWIN, 0, 0, 0)
+[KeyboardInput]::keybd_event($VK_SHIFT, 0, 0, 0)
+[KeyboardInput]::keybd_event($VK_S, 0, 0, 0)
+Start-Sleep -Milliseconds 80
+[KeyboardInput]::keybd_event($VK_S, 0, $KEYEVENTF_KEYUP, 0)
+[KeyboardInput]::keybd_event($VK_SHIFT, 0, $KEYEVENTF_KEYUP, 0)
+[KeyboardInput]::keybd_event($VK_LWIN, 0, $KEYEVENTF_KEYUP, 0)
+"`)
+    safeLog('Triggered native Windows snipping shortcut: Win+Shift+S')
+  } catch (error) {
+    safeError('Failed to trigger native Windows snipping shortcut:', error)
+    throw error
+  }
+}
+
+// 创建选区窗口，让用户选择截图区域
+function createSelectionWindow(): Promise<Rectangle | null> {
+  return new Promise((resolve) => {
+    closeSelectionWindows()
+
+    const displays = screen.getAllDisplays()
+
+    selectionWindows = displays.map((display, index) => {
+      const overlayWindow = new BrowserWindow({
+        x: display.bounds.x,
+        y: display.bounds.y,
+        width: display.bounds.width,
+        height: display.bounds.height,
+        transparent: true,
+        frame: false,
+        alwaysOnTop: true,
+        skipTaskbar: true,
+        resizable: false,
+        movable: false,
+        minimizable: false,
+        maximizable: false,
+        fullscreenable: false,
+        webPreferences: {
+          nodeIntegration: true,
+          contextIsolation: false,
+        },
+      })
+
+      overlayWindow.loadFile(path.join(__dirname, '../src/selection.html'))
+      overlayWindow.setAlwaysOnTop(true, 'screen-saver')
+      if (index === 0) {
+        overlayWindow.focus()
+      }
+
+      return overlayWindow
+    })
+
+    // 监听选区完成事件
+    ipcMain.once('selection-complete', (_event, rect: Rectangle) => {
+      closeSelectionWindows()
+      resolve(rect)
+    })
+
+    // 监听取消事件
+    ipcMain.once('selection-cancelled', () => {
+      closeSelectionWindows()
+      resolve(null)
+    })
+  })
+}
+
+// 根据选区截图
+async function captureScreenArea(area: Rectangle): Promise<Buffer> {
+  const targetDisplay = screen.getDisplayMatching({
+    x: area.x,
+    y: area.y,
+    width: area.width,
+    height: area.height,
+  })
+
+  const sources = await desktopCapturer.getSources({
+    types: ['screen'],
+    thumbnailSize: {
+      width: targetDisplay.bounds.width,
+      height: targetDisplay.bounds.height,
+    }
+  })
+
+  if (sources.length === 0) {
+    throw new Error('无法获取屏幕源')
+  }
+
+  const targetSource = sources.find(source =>
+    source.display_id === String(targetDisplay.id) ||
+    source.id.includes(String(targetDisplay.id))
+  ) || sources[0]
+
+  safeLog('Using display for screenshot:', {
+    displayId: targetDisplay.id,
+    bounds: targetDisplay.bounds,
+    sourceId: targetSource.id,
+    sourceDisplayId: targetSource.display_id,
+  })
+
+  const cropX = Math.max(0, area.x - targetDisplay.bounds.x)
+  const cropY = Math.max(0, area.y - targetDisplay.bounds.y)
+  const cropWidth = Math.min(area.width, targetDisplay.bounds.width - cropX)
+  const cropHeight = Math.min(area.height, targetDisplay.bounds.height - cropY)
+
+  const image = nativeImage.createFromBuffer(targetSource.thumbnail.toPNG())
+
+  // 裁剪出选区
+  const croppedImage = image.crop({
+    x: cropX,
+    y: cropY,
+    width: cropWidth,
+    height: cropHeight
+  })
+
+  return croppedImage.toPNG()
+}
+
+// 处理截图翻译快捷键
+async function handleScreenshotTranslation() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return
+  }
+
+  // 隐藏主窗口
+  if (mainWindow.isVisible()) {
+    mainWindow.hide()
+  }
+
+  try {
+    let imageBuffer: Buffer | null = null
+
+    if (process.platform === 'win32') {
+      imageBuffer = await captureScreenAreaWithNativeWindowsSnipping()
+    } else {
+      const selection = await createSelectionWindow()
+
+      if (!selection) {
+        if (mainWindow && !mainWindow.isVisible()) {
+          mainWindow.show()
+          mainWindow.focus()
+        }
+        return
+      }
+
+      safeLog('Capturing screen area:', selection)
+      imageBuffer = await captureScreenArea(selection)
+    }
+
+    if (!imageBuffer) {
+      if (mainWindow && !mainWindow.isVisible()) {
+        mainWindow.show()
+        mainWindow.focus()
+      }
+      return
+    }
+
+    safeLog('Screenshot captured, size:', imageBuffer.length)
+
+    // 获取当前设置
+    const settings = getSettings()
+    safeLog('Current settings - apiProvider:', settings.apiProvider, 'openaiApiKey:', settings.openaiApiKey ? 'configured' : 'missing')
+
+    // 显示加载提示
+    showWindowAtCursor()
+    mainWindow?.webContents.send('screenshot-translation-status', '正在识别文字...')
+
+    // 调用图片翻译API
+    const translatedText = await translateImage(imageBuffer, settings)
+    safeLog('Translation result:', translatedText)
+
+    // 发送翻译结果到渲染进程
+    mainWindow?.webContents.send('screenshot-translation-result', translatedText)
+  } catch (error) {
+    safeError('Screenshot translation failed:', error)
+    showWindowAtCursor()
+    mainWindow?.webContents.send('screenshot-translation-error', error instanceof Error ? error.message : '翻译失败')
+  }
+}
+
+function normalizeChatCompletionsUrl(apiUrl: string): string {
+  const normalized = apiUrl.trim().replace(/\/$/, '')
+
+  if (/\/chat\/completions$/i.test(normalized)) {
+    return normalized
+  }
+
+  return `${normalized}/chat/completions`
+}
+
+function normalizeSettings(settings?: Partial<Settings>): Settings {
+  return {
+    ...DEFAULT_SETTINGS,
+    ...(settings || {}),
+  }
+}
+
+function buildAuthHeaders(settings: Settings): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  }
+
+  const token = settings.openaiApiKey?.trim()
+  const headerName = settings.openaiAuthHeaderName?.trim()
+  const prefix = settings.openaiAuthPrefix?.trim()
+
+  if (token && headerName) {
+    headers[headerName] = prefix ? `${prefix} ${token}` : token
+  }
+
+  return headers
+}
+
+// 图片翻译函数（主进程中实现）
+async function translateImage(imageBuffer: Buffer, settings: Settings): Promise<string> {
+  safeLog('translateImage called - apiProvider:', settings.apiProvider, 'type:', typeof settings.apiProvider)
+
+  if (!settings.openaiApiUrl?.trim()) {
+    throw new Error('请配置 OpenAI 兼容接口地址')
+  }
+
+  const base64Image = imageBuffer.toString('base64')
+  const requestUrl = normalizeChatCompletionsUrl(settings.openaiApiUrl)
+  const headers = buildAuthHeaders(settings)
+
+  safeLog('Screenshot translation request URL:', requestUrl)
+  safeLog('Screenshot translation auth header:', settings.openaiAuthHeaderName || '(none)', 'prefix:', settings.openaiAuthPrefix || '(none)', 'token:', settings.openaiApiKey ? 'configured' : 'missing')
+
+  const response = await axios.post(
+    requestUrl,
+    {
+      model: settings.visionModel || 'gpt-4o',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'Detect whether the main text in this image is primarily English or Chinese. Translate English into natural Simplified Chinese, and Chinese into natural English. Return only the translation. If there is no clear Chinese or English text, return "No text detected".'
+            },
+            {
+              type: 'image_url',
+              image_url: {
+                url: `data:image/png;base64,${base64Image}`
+              }
+            }
+          ]
+        }
+      ],
+      max_tokens: 500
+    },
+    {
+      headers,
+      timeout: 30000
+    }
+  )
+
+  if (response.data.error) {
+    throw new Error(`API 错误: ${response.data.error.message}`)
+  }
+
+  const result = response.data.choices?.[0]?.message?.content?.trim() || '翻译失败'
+
+  // 处理可能的多模态响应格式
+  if (result.includes('No text detected')) {
+    return '未检测到文字'
+  }
+
+  return result
+}
+
+// 注册截图翻译快捷键
+function registerScreenshotShortcut(shortcut: string): boolean {
+  // 先注销之前的快捷键
+  if (currentScreenshotShortcut) {
+    globalShortcut.unregister(currentScreenshotShortcut)
+  }
+
+  if (!shortcut) {
+    return true
+  }
+
+  const result = globalShortcut.register(shortcut, async () => {
+    const settings = getSettings()
+
+    if (!settings.enableScreenshotTranslation) {
+      safeLog('Screenshot translation is disabled')
+      return
+    }
+
+    await handleScreenshotTranslation()
+  })
+
+  if (result) {
+    currentScreenshotShortcut = shortcut
+    safeLog('Screenshot shortcut registered successfully:', shortcut)
+  } else {
+    safeError('Failed to register screenshot shortcut:', shortcut)
+  }
+
+  return result
 }
 
 // 单实例锁：确保只运行一个应用实例
@@ -121,12 +531,13 @@ const isDev = process.env.NODE_ENV === 'development' ||
 
 // 获取设置
 function getSettings(): Settings {
-  return store.get('settings', DEFAULT_SETTINGS) as Settings
+  const savedSettings = store.get('settings') as Partial<Settings> | undefined
+  return normalizeSettings(savedSettings)
 }
 
 // 保存设置
 function saveSettings(settings: Settings): void {
-  store.set('settings', settings)
+  store.set('settings', normalizeSettings(settings))
 }
 
 function getWindowBounds(): WindowBounds {
@@ -137,15 +548,72 @@ function saveWindowBounds(bounds: WindowBounds): void {
   store.set('windowBounds', bounds)
 }
 
-function normalizeWindowBounds(bounds: WindowBounds): WindowBounds {
-  const { workAreaSize } = screen.getPrimaryDisplay()
-  const maxWidth = Math.max(MIN_WINDOW_WIDTH, workAreaSize.width - 80)
-  const maxHeight = Math.max(MIN_WINDOW_HEIGHT, workAreaSize.height - 80)
+function getCenteredWindowPosition(width: number, height: number) {
+  const primaryDisplay = screen.getPrimaryDisplay()
+  const { workArea } = primaryDisplay
 
   return {
-    width: Math.min(maxWidth, Math.max(MIN_WINDOW_WIDTH, Math.round(bounds.width || DEFAULT_WINDOW_BOUNDS.width))),
-    height: Math.min(maxHeight, Math.max(MIN_WINDOW_HEIGHT, Math.round(bounds.height || DEFAULT_WINDOW_BOUNDS.height))),
+    x: Math.round(workArea.x + (workArea.width - width) / 2),
+    y: Math.round(workArea.y + (workArea.height - height) / 2),
   }
+}
+
+function getDisplayForWindowBounds(bounds: WindowBounds) {
+  if (typeof bounds.x !== 'number' || typeof bounds.y !== 'number') {
+    return null
+  }
+
+  return screen.getDisplayNearestPoint({
+    x: Math.round(bounds.x),
+    y: Math.round(bounds.y),
+  })
+}
+
+function getUiState(): UiState {
+  const savedUiState = store.get('uiState') as Partial<UiState> | undefined
+  return {
+    ...DEFAULT_UI_STATE,
+    ...(savedUiState || {}),
+  }
+}
+
+function saveUiState(state: UiState): void {
+  store.set('uiState', {
+    ...DEFAULT_UI_STATE,
+    ...(state || {}),
+  })
+}
+
+function normalizeWindowBounds(bounds: WindowBounds): WindowBounds {
+  const display = getDisplayForWindowBounds(bounds) || screen.getPrimaryDisplay()
+  const { workArea } = display
+  const maxWidth = Math.max(MIN_WINDOW_WIDTH, workArea.width - 80)
+  const maxHeight = Math.max(MIN_WINDOW_HEIGHT, workArea.height - 80)
+  const width = Math.min(maxWidth, Math.max(MIN_WINDOW_WIDTH, Math.round(bounds.width || DEFAULT_WINDOW_BOUNDS.width)))
+  const height = Math.min(maxHeight, Math.max(MIN_WINDOW_HEIGHT, Math.round(bounds.height || DEFAULT_WINDOW_BOUNDS.height)))
+
+  if (typeof bounds.x !== 'number' || typeof bounds.y !== 'number') {
+    return { width, height }
+  }
+
+  const maxX = Math.max(workArea.x, workArea.x + workArea.width - width)
+  const maxY = Math.max(workArea.y, workArea.y + workArea.height - height)
+
+  return {
+    x: Math.min(maxX, Math.max(workArea.x, Math.round(bounds.x))),
+    y: Math.min(maxY, Math.max(workArea.y, Math.round(bounds.y))),
+    width,
+    height,
+  }
+}
+
+function saveCurrentWindowBounds() {
+  if (!mainWindow) {
+    return
+  }
+
+  const { x, y, width, height } = normalizeWindowBounds(mainWindow.getBounds())
+  saveWindowBounds({ x, y, width, height })
 }
 
 function createDefaultTrayIcon() {
@@ -286,18 +754,18 @@ function createWindow() {
       // 禁用 resize 保存，防止窗口初始化时的抖动被保存
       shouldSaveResize = false
 
-      const primaryDisplay = screen.getPrimaryDisplay()
-      const { bounds: screenBounds } = primaryDisplay
       const { width, height } = mainWindow.getBounds()
+      const savedBounds = normalizeWindowBounds(getWindowBounds())
+      const initialPosition = typeof savedBounds.x === 'number' && typeof savedBounds.y === 'number'
+        ? { x: savedBounds.x, y: savedBounds.y }
+        : getCenteredWindowPosition(width, height)
 
-      const x = Math.round(screenBounds.x + (screenBounds.width - width) / 2)
-      const y = Math.round(screenBounds.y + (screenBounds.height - height) / 2)
-
-      mainWindow.setPosition(x, y)
+      mainWindow.setPosition(initialPosition.x, initialPosition.y)
       mainWindow.show()
       mainWindow.focus()
+      saveCurrentWindowBounds()
 
-      safeLog('Window shown at PRIMARY screen center:', { x, y })
+      safeLog('Window shown at initial position:', { x: initialPosition.x, y: initialPosition.y })
 
       // 延迟恢复 resize 保存，确保窗口完全稳定
       setTimeout(() => {
@@ -312,8 +780,13 @@ function createWindow() {
 
   mainWindow.on('resize', () => {
     if (mainWindow && shouldSaveResize) {
-      const [width, height] = mainWindow.getSize()
-      saveWindowBounds({ width, height })
+      saveCurrentWindowBounds()
+    }
+  })
+
+  mainWindow.on('move', () => {
+    if (mainWindow && shouldSaveResize) {
+      saveCurrentWindowBounds()
     }
   })
 
@@ -329,40 +802,43 @@ function showWindowAtCursor() {
   // 禁用 resize 保存，防止窗口显示时的抖动被保存
   shouldSaveResize = false
 
-  // 每次打开窗口时，重置到理想尺寸
-  const idealWidth = 420
-  const idealHeight = 260
-  mainWindow.setSize(idealWidth, idealHeight)
+  // 获取当前窗口实际大小（不强制重置，保留用户调整的尺寸）
+  const currentBounds = normalizeWindowBounds(mainWindow.getBounds())
+  const width = currentBounds.width
+  const height = currentBounds.height
 
   const cursorPos = screen.getCursorScreenPoint()
   const display = screen.getDisplayNearestPoint(cursorPos)
 
   safeLog('Shortcut triggered, cursor position:', cursorPos)
 
-  let x = cursorPos.x + 15
-  let y = cursorPos.y + 15
+  let x = currentBounds.x
+  let y = currentBounds.y
 
-  const { bounds: screenBounds } = display
+  if (typeof x !== 'number' || typeof y !== 'number') {
+    x = cursorPos.x + 15
+    y = cursorPos.y + 15
 
-  if (x + idealWidth > screenBounds.x + screenBounds.width) {
-    x = cursorPos.x - idealWidth - 15
+    const { bounds: screenBounds } = display
+
+    if (x + width > screenBounds.x + screenBounds.width) {
+      x = cursorPos.x - width - 15
+    }
+
+    if (y + height > screenBounds.y + screenBounds.height) {
+      y = cursorPos.y - height - 15
+    }
+
+    x = Math.round(Math.max(screenBounds.x, x))
+    y = Math.round(Math.max(screenBounds.y, y))
   }
-
-  if (y + idealHeight > screenBounds.y + screenBounds.height) {
-    y = cursorPos.y - idealHeight - 15
-  }
-
-  x = Math.round(Math.max(screenBounds.x, x))
-  y = Math.round(Math.max(screenBounds.y, y))
 
   mainWindow.setPosition(x, y)
   mainWindow.show()
   mainWindow.focus()
+  saveCurrentWindowBounds()
 
-  safeLog('Window shown at cursor position:', { x, y })
-
-  // 更新保存的窗口边界
-  saveWindowBounds({ width: idealWidth, height: idealHeight })
+  safeLog('Window shown at cursor position:', { x, y, width, height })
 
   // 延迟恢复 resize 保存，确保窗口完全稳定
   setTimeout(() => {
@@ -392,6 +868,7 @@ function createTray() {
       click: () => {
         if (mainWindow) {
           if (mainWindow.isVisible()) {
+            saveCurrentWindowBounds()
             mainWindow.hide()
           } else {
             showWindowAtCursor()
@@ -416,6 +893,7 @@ function createTray() {
   tray.on('click', () => {
     if (mainWindow) {
       if (mainWindow.isVisible()) {
+        saveCurrentWindowBounds()
         mainWindow.hide()
       } else {
         showWindowAtCursor()
@@ -435,9 +913,18 @@ if (gotTheLock) {
     const settings = getSettings()
     registerShortcut(settings.shortcut)
 
+    // 注册截图翻译快捷键
+    if (settings.enableScreenshotTranslation && settings.screenshotShortcut) {
+      registerScreenshotShortcut(settings.screenshotShortcut)
+    }
+
     // IPC: 获取设置
     ipcMain.handle('get-settings', () => {
       return getSettings()
+    })
+
+    ipcMain.handle('get-ui-state', () => {
+      return getUiState()
     })
 
     // IPC: 保存设置
@@ -449,11 +936,30 @@ if (gotTheLock) {
         registerShortcut(newSettings.shortcut)
       }
 
+      // 重新注册截图翻译快捷键
+      if (newSettings.enableScreenshotTranslation && newSettings.screenshotShortcut) {
+        if (newSettings.screenshotShortcut !== currentScreenshotShortcut) {
+          registerScreenshotShortcut(newSettings.screenshotShortcut)
+        }
+      } else {
+        // 如果禁用了截图翻译，注销快捷键
+        if (currentScreenshotShortcut) {
+          globalShortcut.unregister(currentScreenshotShortcut)
+          currentScreenshotShortcut = ''
+        }
+      }
+
+      return { success: true }
+    })
+
+    ipcMain.handle('save-ui-state', (_event, nextUiState: UiState) => {
+      saveUiState(nextUiState)
       return { success: true }
     })
 
     ipcMain.on('close-window', () => {
       if (mainWindow) {
+        saveCurrentWindowBounds()
         mainWindow.hide()
       }
     })
@@ -470,7 +976,7 @@ if (gotTheLock) {
         const [currentWidth, currentHeight] = mainWindow.getSize()
         safeLog('set-window-size:', { received: data, current: [currentWidth, currentHeight], next: [nextWidth, nextHeight] })
         mainWindow.setSize(nextWidth, nextHeight)
-        saveWindowBounds({ width: nextWidth, height: nextHeight })
+        saveCurrentWindowBounds()
       }
     })
   })

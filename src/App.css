@@ -97,12 +97,12 @@ html {
 
 /* 内容区域 */
 .content {
-  padding: 8px 12px 40px;
+  padding: 12px 20px 50px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 10px;
   flex: 1;
-  overflow: hidden;
+  overflow-y: auto;
   min-height: 0;
 }
 
@@ -110,24 +110,23 @@ html {
 .input-section,
 .output-section {
   position: relative;
-  flex: 1;
-  min-height: 52px;
+  flex-shrink: 0;
+  height: 160px;
 }
 
 .input-textarea,
 .output-textarea {
   width: 100%;
-  height: 100%;
-  min-height: 52px;
-  padding: 6px 8px;
+  height: 160px;
+  padding: 10px 12px;
   border: 1px solid rgba(0, 0, 0, 0.1);
   border-radius: 8px;
-  font-size: 13px;
+  font-size: 14px;
   font-family: inherit;
   resize: none;
   background: rgba(255, 255, 255, 0.6);
   transition: all 0.2s;
-  flex-shrink: 0;
+  overflow-y: auto;
 }
 
 .input-textarea:focus,
