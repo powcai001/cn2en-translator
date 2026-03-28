@@ -105,7 +105,10 @@ let selectionWindows = [];
 let currentShortcut = DEFAULT_SETTINGS.shortcut;
 let currentScreenshotShortcut = DEFAULT_SETTINGS.screenshotShortcut || '';
 let shouldSaveResize = true; // 控制 resize 事件是否保存窗口大小
+let blurTimeout = null; // blur 延迟隐藏的定时器（模块级，供 showWindowAtCursor 清除）
 let lastShortcutTriggeredAt = 0;
+let lastShowTime = 0; // 窗口最后显示时间，用于 blur 保护期
+let isTranslating = false; // 翻译操作进行中，禁止自动隐藏
 const SHORTCUT_DEBOUNCE_MS = 350;
 function closeSelectionWindows() {
     selectionWindows.forEach(window => {
@@ -122,7 +125,7 @@ async function simulateCopy() {
     }
     try {
         // 使用 PowerShell 模拟 Ctrl+C
-        await execAsync('powershell -Command "$wshell = New-Object -ComObject WScript.Shell; $wshell.SendKeys(\'^c\')"');
+        await execAsync('powershell -WindowStyle Hidden -Command "$wshell = New-Object -ComObject WScript.Shell; $wshell.SendKeys(\'^c\')"');
         // 等待复制操作完成
         await new Promise(resolve => setTimeout(resolve, 50));
     }
@@ -268,6 +271,7 @@ async function handleScreenshotTranslation() {
     if (!mainWindow || mainWindow.isDestroyed()) {
         return;
     }
+    isTranslating = true; // 翻译操作开始，禁止自动隐藏
     // 隐藏主窗口
     if (mainWindow.isVisible()) {
         mainWindow.hide();
@@ -276,6 +280,7 @@ async function handleScreenshotTranslation() {
         let imageBuffer = null;
         const selection = await createSelectionWindow();
         if (!selection) {
+            isTranslating = false;
             if (mainWindow && !mainWindow.isVisible()) {
                 mainWindow.show();
                 mainWindow.focus();
@@ -285,6 +290,7 @@ async function handleScreenshotTranslation() {
         safeLog('Capturing screen area:', selection);
         imageBuffer = await captureScreenArea(selection);
         if (!imageBuffer) {
+            isTranslating = false;
             if (mainWindow && !mainWindow.isVisible()) {
                 mainWindow.show();
                 mainWindow.focus();
@@ -295,9 +301,9 @@ async function handleScreenshotTranslation() {
         // 获取当前设置
         const settings = getSettings();
         safeLog('Current settings - apiProvider:', settings.apiProvider, 'openaiApiKey:', settings.openaiApiKey ? 'configured' : 'missing');
-        // 显示加载提示
-        showWindowAtCursor(true);
+        // 先发送加载状态到渲染进程，再显示窗口，避免旧内容闪现
         mainWindow?.webContents.send('screenshot-translation-status', '正在识别文字...');
+        showWindowAtCursor(true);
         // 调用图片翻译API
         const translatedText = await translateImage(imageBuffer, settings);
         safeLog('Translation result:', translatedText);
@@ -308,6 +314,9 @@ async function handleScreenshotTranslation() {
         safeError('Screenshot translation failed:', error);
         showWindowAtCursor(true);
         mainWindow?.webContents.send('screenshot-translation-error', error instanceof Error ? error.message : '翻译失败');
+    }
+    finally {
+        isTranslating = false;
     }
 }
 function normalizeChatCompletionsUrl(apiUrl) {
@@ -549,16 +558,23 @@ function registerShortcut(shortcut) {
         if (!shouldHandleShortcutTrigger()) {
             return;
         }
+        isTranslating = true; // 翻译操作开始，禁止自动隐藏
         // 先模拟 Ctrl+C 复制选中的文字
         await simulateCopy();
         // 等待一小段时间确保复制完成
         await new Promise(resolve => setTimeout(resolve, 100));
         const selectedText = electron_1.clipboard.readText();
         safeLog('Shortcut triggered, clipboard text:', selectedText);
-        showWindowAtCursor(true);
+        // 先发送翻译内容到渲染进程，再显示窗口，避免旧内容闪现
         if (mainWindow && selectedText) {
             mainWindow.webContents.send('translate-shortcut', selectedText);
         }
+        showWindowAtCursor(true);
+        // 延迟重置标志，给用户充足时间查看翻译结果
+        setTimeout(() => {
+            isTranslating = false;
+            safeLog('[DEBUG] isTranslating reset to false');
+        }, 10000);
     });
     if (result) {
         currentShortcut = shortcut;
@@ -572,15 +588,17 @@ function registerShortcut(shortcut) {
                 if (!shouldHandleShortcutTrigger()) {
                     return;
                 }
-                // 先模拟 Ctrl+C 复制选中的文字
+                isTranslating = true;
                 await simulateCopy();
-                // 等待一小段时间确保复制完成
                 await new Promise(resolve => setTimeout(resolve, 100));
                 const selectedText = electron_1.clipboard.readText();
-                showWindowAtCursor(true);
                 if (mainWindow && selectedText) {
                     mainWindow.webContents.send('translate-shortcut', selectedText);
                 }
+                showWindowAtCursor(true);
+                setTimeout(() => {
+                    isTranslating = false;
+                }, 500);
             });
         }
     }
@@ -596,6 +614,7 @@ function createWindow() {
         minHeight: MIN_WINDOW_HEIGHT,
         frame: false,
         transparent: true,
+        backgroundColor: '#00000000',
         resizable: true, // 使用原生 resize
         alwaysOnTop: true,
         skipTaskbar: false,
@@ -644,6 +663,7 @@ function createWindow() {
             mainWindow.setPosition(initialPosition.x, initialPosition.y);
             mainWindow.show();
             mainWindow.focus();
+            lastShowTime = Date.now();
             saveCurrentWindowBounds();
             safeLog('Window shown at initial position:', { x: initialPosition.x, y: initialPosition.y });
             // 延迟恢复 resize 保存，确保窗口完全稳定
@@ -654,6 +674,13 @@ function createWindow() {
     });
     mainWindow.on('closed', () => {
         mainWindow = null;
+    });
+    // 调试日志：追踪窗口显示/隐藏
+    mainWindow.on('show', () => {
+        safeLog('[DEBUG] window SHOW event', new Error().stack?.split('\n').slice(1, 4).join('\n'));
+    });
+    mainWindow.on('hide', () => {
+        safeLog('[DEBUG] window HIDE event', new Error().stack?.split('\n').slice(1, 4).join('\n'));
     });
     mainWindow.on('resize', () => {
         if (mainWindow && shouldSaveResize) {
@@ -666,18 +693,24 @@ function createWindow() {
         }
     });
     // 点击窗口外部时隐藏窗口（延迟检查，避免误触发）
-    let blurTimeout = null;
     mainWindow.on('blur', () => {
+        safeLog('[DEBUG] window BLUR event, isVisible:', mainWindow?.isVisible(), 'isTranslating:', isTranslating);
+        if (isTranslating) {
+            safeLog('[DEBUG] BLUR ignored: translation in progress');
+            return;
+        }
         if (mainWindow && mainWindow.isVisible()) {
             // 延迟隐藏，给窗口重新获得焦点的机会
             blurTimeout = setTimeout(() => {
-                if (mainWindow && !mainWindow.isFocused() && mainWindow.isVisible()) {
+                safeLog('[DEBUG] blur timeout fired, isFocused:', mainWindow?.isFocused(), 'isVisible:', mainWindow?.isVisible(), 'isTranslating:', isTranslating);
+                if (mainWindow && !mainWindow.isFocused() && mainWindow.isVisible() && !isTranslating) {
                     mainWindow.hide();
                 }
             }, 150);
         }
     });
     mainWindow.on('focus', () => {
+        safeLog('[DEBUG] window FOCUS event');
         // 如果窗口重新获得焦点，取消隐藏
         if (blurTimeout) {
             clearTimeout(blurTimeout);
@@ -693,6 +726,11 @@ function showWindowAtCursor(resultMode = false) {
     }
     // 禁用 resize 保存，防止窗口显示时的抖动被保存
     shouldSaveResize = false;
+    // 清除可能存在的 blur 隐藏定时器，防止窗口刚显示就被隐藏导致闪动
+    if (blurTimeout) {
+        clearTimeout(blurTimeout);
+        blurTimeout = null;
+    }
     // 获取当前窗口实际大小（不强制重置，保留用户调整的尺寸）
     const currentBounds = normalizeWindowBounds(mainWindow.getBounds());
     const width = currentBounds.width;
@@ -716,11 +754,12 @@ function showWindowAtCursor(resultMode = false) {
         y = Math.round(Math.max(screenBounds.y, y));
     }
     mainWindow.setPosition(x, y);
+    // 先通知渲染进程切换模式，再显示窗口，避免旧内容闪现
+    mainWindow.webContents.send('window-mode-changed', resultMode ? 'result' : 'input');
     mainWindow.show();
     mainWindow.focus();
+    lastShowTime = Date.now(); // 记录显示时间，blur 保护期内不自动隐藏
     saveCurrentWindowBounds();
-    // 通知渲染进程切换模式
-    mainWindow.webContents.send('window-mode-changed', resultMode ? 'result' : 'input');
     safeLog('Window shown at cursor position:', { x, y, width, height, mode: resultMode ? 'result' : 'input' });
     // 延迟恢复 resize 保存，确保窗口完全稳定
     setTimeout(() => {
@@ -827,6 +866,16 @@ if (gotTheLock) {
             return { success: true };
         });
         electron_1.ipcMain.on('close-window', () => {
+            safeLog('[DEBUG] close-window IPC received, isTranslating:', isTranslating, 'timeSinceShow:', Date.now() - lastShowTime, 'ms');
+            if (isTranslating) {
+                safeLog('[DEBUG] close-window ignored: translation in progress');
+                return;
+            }
+            // 启动/显示后短时间内的 close-window 忽略，防止闪动
+            if (Date.now() - lastShowTime < 500) {
+                safeLog('[DEBUG] close-window ignored: within show grace period');
+                return;
+            }
             if (mainWindow) {
                 saveCurrentWindowBounds();
                 mainWindow.hide();

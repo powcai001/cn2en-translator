@@ -184,6 +184,7 @@ function App() {
       if (showSettings) return
 
       if (e.key === 'Escape') {
+        console.log('[DEBUG] ESC key pressed, closing window')
         closeWindow()
       } else if (e.key === 'c' && targetText) {
         copyResult()
@@ -239,13 +240,10 @@ function App() {
   }
 
   const closeWindow = () => {
-    console.log('Close button clicked')
+    console.log('[DEBUG] closeWindow called', new Error().stack)
     const ipcRenderer = getIpcRenderer()
     if (ipcRenderer) {
-      console.log('Sending close-window IPC message')
       ipcRenderer.send('close-window')
-    } else {
-      console.log('IPC renderer not available')
     }
   }
 
