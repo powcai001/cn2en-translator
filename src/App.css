@@ -146,6 +146,7 @@ html {
 .output-textarea {
   background: rgba(248, 250, 252, 0.8);
   color: #1a1a1a;
+  padding-bottom: 32px;
 }
 
 /* 操作按钮 */
@@ -188,8 +189,8 @@ html {
 /* 复制按钮 */
 .copy-btn {
   position: absolute;
-  top: 4px;
-  right: 4px;
+  bottom: 8px;
+  right: 8px;
   background: rgba(102, 126, 234, 0.9);
   color: white;
   border: none;
